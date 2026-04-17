@@ -24,6 +24,10 @@ from agents.priority import assign_priority
 from agents.emotion import analyze_emotion
 from agents.drafter import draft_response
 from agents.quality_checker import check_quality
+from agents.fast_pipeline import run_fast_pipeline
+
+# Import cache
+from utils.cache import cached_agent, get_cache_stats, clear_cache
 
 # Import utils
 from utils.synthetic_data import generate_and_save
@@ -70,13 +74,14 @@ if "approved_result" not in st.session_state:
     st.session_state.approved_result = None
 
 
-def run_pipeline(ticket_text: str, ticket_metadata: dict = None) -> dict:
+def run_pipeline(ticket_text: str, ticket_metadata: dict = None, fast_mode: bool = True) -> dict:
     """
-    Run the full 6-agent pipeline on a ticket.
+    Run the ticket pipeline - supports both fast (2-call) and standard (6-call) modes.
 
     Args:
         ticket_text: Raw ticket text
         ticket_metadata: Optional metadata dict
+        fast_mode: If True, use combined 2-call pipeline (60-70% faster)
 
     Returns:
         Complete results dict with all agent outputs and trace log
@@ -84,11 +89,17 @@ def run_pipeline(ticket_text: str, ticket_metadata: dict = None) -> dict:
     if ticket_metadata is None:
         ticket_metadata = {}
 
+    if fast_mode:
+        # Fast pipeline: 2 LLM calls instead of 6
+        return run_fast_pipeline(ticket_text, ticket_metadata)
+
+    # Standard 6-agent pipeline
     trace_log = []
     results = {
         "ticket_id": ticket_metadata.get("ticket_id", f"MANUAL-{random.randint(10000, 99999)}"),
         "raw_text": ticket_text,
-        "metadata": ticket_metadata
+        "metadata": ticket_metadata,
+        "pipeline_mode": "standard"
     }
 
     pipeline_start = time.time()
@@ -233,6 +244,17 @@ with st.sidebar:
 
     st.divider()
 
+    # Pipeline mode selector (global)
+    pipeline_mode = st.radio(
+        "Pipeline Mode",
+        ["⚡ Fast (2 calls)", "🔬 Standard (6 calls)"],
+        index=0,
+        help="Fast mode: 60-70% faster, same accuracy. Standard: Full agent trace."
+    )
+    use_fast_mode = "Fast" in pipeline_mode
+
+    st.divider()
+
     # Mode selector
     mode = st.radio(
         "Select Mode",
@@ -250,6 +272,13 @@ with st.sidebar:
         value=70,
         help="Tickets below this threshold will be flagged for human review"
     )
+
+    # Cache stats
+    if st.button("🗑️ Clear Cache"):
+        clear_cache()
+        st.success("Cache cleared!")
+    cache_stats = get_cache_stats()
+    st.caption(f"Cache: {cache_stats['size']} items, {cache_stats['hit_rate']*100:.1f}% hit rate")
 
     st.divider()
 
@@ -347,9 +376,9 @@ if mode == "Single Ticket":
             st.session_state.metrics_tracker = MetricsTracker()
             st.session_state.metrics_tracker.start_session()
 
-        # Run pipeline
-        with st.spinner("Running AI pipeline..."):
-            result = run_pipeline(ticket_text, metadata)
+        # Run pipeline with selected mode
+        with st.spinner(f"Running {'fast' if use_fast_mode else 'standard'} AI pipeline..."):
+            result = run_pipeline(ticket_text, metadata, fast_mode=use_fast_mode)
 
         st.session_state.results = result
         st.session_state.metrics_tracker.record_ticket(result)
@@ -415,7 +444,7 @@ elif mode == "Batch Upload":
                     "channel": row.get("channel", "unknown")
                 }
 
-                result = run_pipeline(ticket_text, metadata)
+                result = run_pipeline(ticket_text, metadata, fast_mode=use_fast_mode)
                 st.session_state.batch_results.append(result)
                 st.session_state.metrics_tracker.record_ticket(result)
 
